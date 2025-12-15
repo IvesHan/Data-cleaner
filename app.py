@@ -80,7 +80,7 @@ if app_mode == "单表处理 (清洗/筛选/透视)":
             tab_clean, tab_pivot = st.tabs(["🧹 数据清洗与导出", "📈 数据透视表"])
 
             # ------------------------------------------------------------
-            # Tab 1: 清洗逻辑 (严格按顺序执行)
+            # Tab 1: 清洗逻辑
             # ------------------------------------------------------------
             with tab_clean:
                 # [Step 1] 列选择与排序
@@ -103,8 +103,6 @@ if app_mode == "单表处理 (清洗/筛选/透视)":
 
                 # [Step 2] 内容筛选
                 st.subheader("2. 内容筛选 (Filter)")
-                
-                # 初始化 df_result，默认等于上一步的结果
                 df_result = df_step1.copy()
 
                 with st.container(border=True):
@@ -114,15 +112,11 @@ if app_mode == "单表处理 (清洗/筛选/透视)":
                     
                     if filter_target != "无":
                         with f_col2:
-                            # 数值筛选
                             if pd.api.types.is_numeric_dtype(df_step1[filter_target]):
                                 min_v = float(df_step1[filter_target].min())
                                 max_v = float(df_step1[filter_target].max())
                                 rng = st.slider(f"数值范围 ({filter_target})", min_v, max_v, (min_v, max_v))
-                                # 更新 df_result
                                 df_result = df_step1[(df_step1[filter_target] >= rng[0]) & (df_step1[filter_target] <= rng[1])]
-                            
-                            # 文本筛选
                             else:
                                 text_input = st.text_area(
                                     f"输入筛选值 (支持多行粘贴)", 
@@ -133,38 +127,60 @@ if app_mode == "单表处理 (清洗/筛选/透视)":
 
                                 if text_input.strip():
                                     keywords = re.split(r'[,\s;，；|\n]+', text_input.strip())
-                                    keywords = [k for k in keywords if k] # 去除空值
+                                    keywords = [k for k in keywords if k]
                                     
                                     if keywords:
                                         if match_mode == "精确匹配 (Is In)":
-                                            # 更新 df_result
                                             df_result = df_step1[df_step1[filter_target].astype(str).isin(keywords)]
                                         else:
                                             pattern = "|".join([re.escape(k) for k in keywords])
-                                            # 更新 df_result
                                             df_result = df_step1[df_step1[filter_target].astype(str).str.contains(pattern, case=False, na=False)]
                 
-                # [Step 3] 行截取 (最后一步)
-                st.subheader("3. 行截取 (按位置)")
-                if len(df_result) > 0:
-                    row_range = st.slider("保留行范围", 0, len(df_result), (0, len(df_result)))
-                    df_result = df_result.iloc[row_range[0]:row_range[1]]
+                # ------------------------------------------------------------
+                # [Step 3] 行截取 (已修改：改为手动输入数字)
+                # ------------------------------------------------------------
+                st.subheader("3. 行截取 (精确范围)")
+                current_total = len(df_result)
+                
+                if current_total > 0:
+                    r_col1, r_col2 = st.columns(2)
+                    with r_col1:
+                        # 起始行输入，默认为 0
+                        start_idx = st.number_input(
+                            "起始行号 (Start Index, 包含)", 
+                            min_value=0, 
+                            max_value=current_total-1, 
+                            value=0, 
+                            step=1
+                        )
+                    with r_col2:
+                        # 结束行输入，默认为总行数
+                        end_idx = st.number_input(
+                            "结束行号 (End Index, 不包含)", 
+                            min_value=start_idx+1, 
+                            max_value=current_total, 
+                            value=current_total, 
+                            step=1
+                        )
+                    
+                    # 执行切片
+                    df_result = df_result.iloc[start_idx:end_idx]
+                    st.caption(f"当前截取范围: 第 {start_idx} 行 到 第 {end_idx} 行")
+                else:
+                    st.warning("当前没有数据可供截取")
 
                 # ------------------------------------------------------------
-                # [Step 4] 结果预览与导出 (必须使用 df_result)
+                # [Step 4] 结果预览与导出
                 # ------------------------------------------------------------
                 st.divider()
                 st.subheader(f"4. 结果预览与导出 (共 {len(df_result)} 行)")
                 
-                # 增加动态指标，让用户确认数据已更新
-                m1, m2, m3 = st.columns(3)
+                m1, m2 = st.columns(2)
                 m1.metric("原始行数", len(df_raw))
                 m2.metric("当前行数", len(df_result), delta=len(df_result)-len(df_raw))
                 
-                # 预览表格
                 st.dataframe(df_result, use_container_width=True)
                 
-                # 导出按钮
                 st.write("#### 下载文件")
                 d_col1, d_col2 = st.columns(2)
                 file_name_base = uploaded_file.name.split('.')[0]
@@ -182,9 +198,7 @@ if app_mode == "单表处理 (清洗/筛选/透视)":
                     mime="text/csv"
                 )
 
-            # ------------------------------------------------------------
-            # Tab 2: 透视表 (逻辑保持不变)
-            # ------------------------------------------------------------
+            # Tab 2: 透视表
             with tab_pivot:
                 st.subheader("数据透视分析")
                 if not df_raw.empty:
@@ -205,9 +219,6 @@ if app_mode == "单表处理 (清洗/筛选/透视)":
         except Exception as e:
             st.error(f"处理出错: {e}")
 
-# ========================================================
-# 模式 2: 多表合并
-# ========================================================
 elif app_mode == "多表合并":
     st.subheader("📚 多文件合并工具")
     
@@ -219,7 +230,6 @@ elif app_mode == "多表合并":
         
         for i, f in enumerate(files):
             try:
-                # 默认读取设置
                 d = load_data(f, 0, 0)
                 d['Source_File'] = f.name 
                 dfs.append(d)
@@ -230,6 +240,5 @@ elif app_mode == "多表合并":
         if dfs:
             merged = pd.concat(dfs, ignore_index=True)
             st.success(f"合并完成: 共处理 {len(files)} 个文件")
-            
             st.dataframe(merged.head(100), use_container_width=True)
             st.download_button("下载合并结果 (Excel)", to_excel(merged), "merged_data_ives.xlsx")

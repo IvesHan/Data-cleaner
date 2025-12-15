@@ -4,20 +4,27 @@ import io
 import csv
 import re
 
-# 设置页面配置
-st.set_page_config(page_title="超级表格助手", layout="wide", page_icon="🚀")
+# --- 页面基础配置 ---
+st.set_page_config(
+    page_title="表格处理工具 (Ives)", 
+    layout="wide", 
+    page_icon="📑"
+)
 
-st.title("🚀 超级表格助手：清洗 · 合并 · 透视")
+# --- 标题区 ---
+st.title("表格处理工具")
+st.caption("Designed by Ives")  # 署名位置
+st.divider()
 
-# --- 侧边栏：功能模式选择 ---
-st.sidebar.header("🛠 功能模式")
-app_mode = st.sidebar.radio("选择操作模式", ["单表处理 (清洗/筛选/透视)", "多表合并 (纵向拼接)"])
+# --- 侧边栏：全局设置 ---
+st.sidebar.header("操作模式")
+app_mode = st.sidebar.radio("选择功能", ["单表处理 (清洗/筛选/透视)", "多表合并"])
 
-# --- 通用函数 ---
+# --- 核心函数库 ---
 def detect_separator(file_buffer):
-    """尝试检测分隔符"""
+    """尝试检测文本文件的分隔符"""
     try:
-        sample = file_buffer.read(1024).decode("utf-8")
+        sample = file_buffer.read(2048).decode("utf-8")
         file_buffer.seek(0)
         sniffer = csv.Sniffer()
         dialect = sniffer.sniff(sample)
@@ -27,205 +34,193 @@ def detect_separator(file_buffer):
         return ","
 
 def load_data(uploaded_file, skip_rows, header_row, sep=None):
-    """通用数据加载函数"""
+    """读取文件的统一入口"""
     file_ext = uploaded_file.name.split('.')[-1].lower()
     if file_ext in ['xls', 'xlsx']:
         return pd.read_excel(uploaded_file, skiprows=skip_rows, header=header_row)
     else:
-        # 如果未指定分隔符，尝试自动检测
         if sep is None:
             sep = detect_separator(uploaded_file)
         return pd.read_csv(uploaded_file, sep=sep, skiprows=skip_rows, header=header_row, engine='python')
 
-def convert_df_to_csv(df):
-    return df.to_csv(index=False).encode('utf-8-sig')
-
-def convert_df_to_excel(df):
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+def to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
-    return buffer
+    return output
 
 # ========================================================
-# 模式 1: 单表处理 (清洗 + 透视)
+# 模式 1: 单表处理 (核心清洗逻辑)
 # ========================================================
 if app_mode == "单表处理 (清洗/筛选/透视)":
-    st.sidebar.divider()
-    st.sidebar.subheader("📄 文件读取设置")
     
-    uploaded_file = st.sidebar.file_uploader("上传单个文件", type=['csv', 'xlsx', 'xls', 'tsv', 'txt', 'dat'])
+    # 1. 文件上传区
+    st.sidebar.subheader("文件读取")
+    uploaded_file = st.sidebar.file_uploader("上传文件", type=['csv', 'xlsx', 'xls', 'tsv', 'txt'])
     
     if uploaded_file:
         # 读取参数
-        skip_rows = st.sidebar.number_input("跳过前 N 行", 0, 100, 0)
-        header_row = st.sidebar.number_input("标题所在行", 0, 100, 0)
-        
-        # 分隔符设置
-        sep_option = "自动识别"
-        file_ext = uploaded_file.name.split('.')[-1].lower()
-        if file_ext not in ['xlsx', 'xls']:
-            sep_option = st.sidebar.selectbox("分隔符", ("自动识别", ",", "\t", ";", "|", "自定义"))
-        
-        sep = None
-        if sep_option == ",": sep = ","
-        elif sep_option == "\t": sep = "\t"
-        elif sep_option == ";": sep = ";"
-        elif sep_option == "|": sep = "|"
-        elif sep_option == "自定义": sep = st.sidebar.text_input("输入分隔符", ",")
-        
+        with st.sidebar.expander("读取参数配置 (可选)"):
+            skip_rows = st.number_input("跳过前 N 行", 0, 100, 0)
+            header_row = st.number_input("标题所在行", 0, 100, 0)
+            
+            # 分隔符逻辑
+            sep_option = "自动识别"
+            if uploaded_file.name.split('.')[-1].lower() not in ['xlsx', 'xls']:
+                sep_option = st.selectbox("列分隔符", ("自动识别", ",", "\t", ";", "|", "自定义"))
+            
+            sep = None
+            if sep_option == "自定义":
+                sep = st.text_input("输入分隔符", ",")
+            elif sep_option != "自动识别":
+                sep_map = {",": ",", "\t": "\t", ";": ";", "|": "|"}
+                sep = sep_map.get(sep_option, ",")
+
         try:
-            # 加载数据
-            df = load_data(uploaded_file, skip_rows, header_row, sep)
-            st.success(f"已加载: {uploaded_file.name} ({df.shape[0]} 行, {df.shape[1]} 列)")
+            # 加载原始数据
+            df_raw = load_data(uploaded_file, skip_rows, header_row, sep)
+            st.sidebar.success(f"已读取: {len(df_raw)} 行")
 
-            # 使用 Tabs 分离 清洗导出 和 数据透视
-            tab1, tab2 = st.tabs(["🧹 数据清洗与导出", "📈 数据透视表"])
+            # -----------------------------------------------------------
+            # 数据处理流水线 (Pipeline)
+            # 逻辑顺序：列选择 -> 排序 -> 内容筛选 -> 行截取 -> 展示/导出
+            # -----------------------------------------------------------
+            
+            # tab 分区
+            tab_clean, tab_pivot = st.tabs(["数据清洗", "数据透视"])
 
-            # --- Tab 1: 清洗与筛选 ---
-            with tab1:
-                st.subheader("1. 字段与排序")
-                c1, c2 = st.columns(2)
+            with tab_clean:
+                # 1. 列管理
+                c1, c2 = st.columns([3, 1])
                 with c1:
-                    all_cols = df.columns.tolist()
-                    sel_cols = st.multiselect("选择保留列", all_cols, default=all_cols)
-                    if not sel_cols: sel_cols = all_cols
+                    all_cols = df_raw.columns.tolist()
+                    selected_cols = st.multiselect("1. 保留列 (留空则保留全部)", all_cols, default=all_cols)
+                    if not selected_cols: selected_cols = all_cols
+                
                 with c2:
-                    sort_col = st.selectbox("排序依据", ["无"] + sel_cols)
-                    sort_asc = st.checkbox("升序排列", value=True)
+                    sort_col = st.selectbox("2. 排序依据", ["无"] + selected_cols)
+                    sort_asc = st.checkbox("升序", value=True)
 
-                df_cleaned = df[sel_cols]
+                # 初步处理：切片列 + 排序
+                df_step1 = df_raw[selected_cols].copy()
                 if sort_col != "无":
-                    df_cleaned = df_cleaned.sort_values(by=sort_col, ascending=sort_asc)
+                    df_step1 = df_step1.sort_values(by=sort_col, ascending=sort_asc)
 
-                st.subheader("2. 高级内容筛选")
-                # 增强版筛选：支持集合输入
-                with st.expander("点击展开筛选面板", expanded=True):
-                    f_col1, f_col2 = st.columns([1, 2])
+                # 2. 高级内容筛选 (重点修改部分)
+                st.markdown("##### 3. 内容筛选")
+                with st.container(border=True): # 使用边框包裹，更清晰
+                    f_col1, f_col2 = st.columns([1, 3])
                     with f_col1:
-                        filter_target = st.selectbox("选择筛选列", ["无"] + sel_cols)
+                        filter_target = st.selectbox("筛选目标列", ["无"] + selected_cols)
                     
+                    # 初始化结果为上一步的结果
+                    df_step2 = df_step1 
+
                     if filter_target != "无":
                         with f_col2:
-                            if pd.api.types.is_numeric_dtype(df_cleaned[filter_target]):
-                                min_v, max_v = float(df_cleaned[filter_target].min()), float(df_cleaned[filter_target].max())
-                                rng = st.slider("数值范围", min_v, max_v, (min_v, max_v))
-                                df_cleaned = df_cleaned[(df_cleaned[filter_target] >= rng[0]) & (df_cleaned[filter_target] <= rng[1])]
+                            # 区分数值和文本
+                            if pd.api.types.is_numeric_dtype(df_step1[filter_target]):
+                                min_v = float(df_step1[filter_target].min())
+                                max_v = float(df_step1[filter_target].max())
+                                rng = st.slider(f"选择 {filter_target} 范围", min_v, max_v, (min_v, max_v))
+                                df_step2 = df_step1[(df_step1[filter_target] >= rng[0]) & (df_step1[filter_target] <= rng[1])]
                             else:
-                                st.markdown("👇 **多值匹配模式**：输入多个值，用逗号、空格或分号隔开")
-                                text_input = st.text_area("输入筛选值集合 (例如: ID001, ID002 ID003)", height=68)
-                                match_mode = st.radio("匹配模式", ["精确匹配 (Is In)", "模糊包含 (Contains)"], horizontal=True)
+                                # 文本多值筛选
+                                text_input = st.text_area(
+                                    f"输入 {filter_target} 的筛选值 (支持批量粘贴)", 
+                                    height=100,
+                                    placeholder="例如：\nA001\nA002, A003\n(支持逗号、空格、换行分隔)"
+                                )
+                                match_mode = st.radio("匹配逻辑", ["精确匹配 (等于)", "模糊匹配 (包含)"], horizontal=True)
                                 
-                                if text_input:
-                                    # 自动正则分割：逗号、中文逗号、分号、竖线、空格、换行
+                                st.caption("提示：输入内容后，请按 Ctrl+Enter 或点击输入框外区域以生效。")
+
+                                if text_input.strip():
+                                    # 核心正则拆分
                                     keywords = re.split(r'[,\s;，；|\n]+', text_input.strip())
-                                    # 去除空字符串
-                                    keywords = [k for k in keywords if k]
+                                    keywords = [k for k in keywords if k] # 去除空值
                                     
                                     if keywords:
-                                        st.caption(f"识别到的筛选词 ({len(keywords)}个): {keywords}")
-                                        if match_mode == "精确匹配 (Is In)":
-                                            # 转换为字符串对比，防止类型不匹配
-                                            df_cleaned = df_cleaned[df_cleaned[filter_target].astype(str).isin(keywords)]
+                                        if match_mode == "精确匹配 (等于)":
+                                            # 强制转字符串对比
+                                            mask = df_step1[filter_target].astype(str).isin(keywords)
+                                            df_step2 = df_step1[mask]
                                         else:
-                                            # 模糊包含：只要包含列表里任意一个词
+                                            # 模糊包含
                                             pattern = "|".join([re.escape(k) for k in keywords])
-                                            df_cleaned = df_cleaned[df_cleaned[filter_target].astype(str).str.contains(pattern, na=False)]
-
-                st.subheader("3. 结果预览")
-                st.dataframe(df_cleaned, use_container_width=True)
+                                            mask = df_step1[filter_target].astype(str).str.contains(pattern, case=False, na=False)
+                                            df_step2 = df_step1[mask]
+                                    
+                                    # 状态回显
+                                    st.info(f"筛选关键词: {len(keywords)} 个 | 命中行数: {len(df_step2)} (原 {len(df_step1)} 行)")
                 
-                # 导出区
-                st.subheader("📥 导出结果")
-                ec1, ec2 = st.columns(2)
-                ec1.download_button("下载 CSV", convert_df_to_csv(df_cleaned), f"cleaned_{uploaded_file.name}.csv", "text/csv")
-                ec2.download_button("下载 Excel", convert_df_to_excel(df_cleaned), f"cleaned_{uploaded_file.name}.xlsx")
-
-            # --- Tab 2: 数据透视表 ---
-            with tab2:
-                st.subheader("数据透视分析 (Pivot Table)")
+                # 3. 结果展示
+                st.markdown("##### 4. 结果预览与导出")
+                st.dataframe(df_step2, use_container_width=True)
                 
-                p_c1, p_c2, p_c3, p_c4 = st.columns(4)
-                with p_c1:
-                    index_col = st.multiselect("行 (Index)", df.columns)
-                with p_c2:
-                    columns_col = st.multiselect("列 (Columns)", df.columns)
-                with p_c3:
-                    values_col = st.multiselect("值 (Values)", df.columns)
-                with p_c4:
-                    agg_func = st.selectbox("聚合方式", ["sum", "mean", "count", "min", "max", "nunique"])
+                # 导出按钮
+                col_d1, col_d2 = st.columns(2)
+                file_label = uploaded_file.name.split('.')[0]
+                
+                col_d1.download_button(
+                    "📥 导出 Excel",
+                    data=to_excel(df_step2),
+                    file_name=f"{file_label}_processed_ives.xlsx"
+                )
+                col_d2.download_button(
+                    "📥 导出 CSV",
+                    data=df_step2.to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f"{file_label}_processed_ives.csv",
+                    mime="text/csv"
+                )
 
-                if index_col and values_col:
-                    try:
-                        pivot_df = pd.pivot_table(
-                            df, 
-                            index=index_col, 
-                            columns=columns_col if columns_col else None, 
-                            values=values_col, 
-                            aggfunc=agg_func
-                        )
-                        st.write("透视结果预览：")
-                        st.dataframe(pivot_df, use_container_width=True)
-                        
-                        st.download_button(
-                            "📥 下载透视表 (Excel)",
-                            convert_df_to_excel(pivot_df),
-                            "pivot_table.xlsx"
-                        )
-                    except Exception as e:
-                        st.error(f"透视表生成失败: {e}。请检查选择的'值'列是否为数字类型。")
-                else:
-                    st.info("请至少选择一个 '行' 和一个 '值' 来生成透视表。")
+            with tab_pivot:
+                st.subheader("数据透视分析")
+                if not df_raw.empty:
+                    p_c1, p_c2, p_c3 = st.columns(3)
+                    idx = p_c1.multiselect("行维度 (Index)", df_raw.columns)
+                    cols = p_c2.multiselect("列维度 (Columns)", df_raw.columns)
+                    vals = p_c3.multiselect("数值 (Values)", df_raw.columns)
+                    func = st.selectbox("计算方式", ["sum", "mean", "count", "max", "min", "nunique"])
+                    
+                    if idx and vals:
+                        try:
+                            df_pivot = pd.pivot_table(df_raw, index=idx, columns=cols if cols else None, values=vals, aggfunc=func)
+                            st.dataframe(df_pivot, use_container_width=True)
+                            st.download_button("导出透视表", to_excel(df_pivot), f"{file_label}_pivot.xlsx")
+                        except Exception as e:
+                            st.error(f"透视表生成错误: {e}")
+                    else:
+                        st.info("请至少选择【行维度】和【数值】。")
 
         except Exception as e:
-            st.error(f"处理出错: {e}")
+            st.error(f"文件处理出错: {e}")
 
 # ========================================================
 # 模式 2: 多表合并
 # ========================================================
-elif app_mode == "多表合并 (纵向拼接)":
-    st.sidebar.divider()
-    st.subheader("📚 多文件合并")
-    st.markdown("上传多个结构相似的文件（如 1月数据.csv, 2月数据.xlsx），程序将自动把它们纵向拼接在一起。")
+elif app_mode == "多表合并":
+    st.subheader("多文件合并工具")
+    st.markdown("支持上传多个 CSV/Excel 文件，程序将自动进行纵向拼接。")
     
-    uploaded_files = st.file_uploader("上传一系列文件", accept_multiple_files=True)
+    files = st.file_uploader("批量上传文件", accept_multiple_files=True)
     
-    if uploaded_files:
-        if st.button("开始合并"):
-            dfs = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+    if files and st.button("开始合并数据"):
+        dfs = []
+        bar = st.progress(0)
+        
+        for i, f in enumerate(files):
+            try:
+                # 简化的读取逻辑，默认第一行为表头
+                d = load_data(f, 0, 0)
+                d['Source_File'] = f.name # 自动标记来源
+                dfs.append(d)
+            except:
+                st.error(f"{f.name} 读取失败")
+            bar.progress((i+1)/len(files))
             
-            for i, file in enumerate(uploaded_files):
-                status_text.text(f"正在读取: {file.name}...")
-                try:
-                    # 复用简单的加载逻辑（这里假设所有文件格式参数一致，实际可扩展）
-                    # 默认跳过0行，标题在第0行
-                    current_df = load_data(file, 0, 0)
-                    # 可以在这里加一列标识来源文件
-                    current_df['_来源文件'] = file.name
-                    dfs.append(current_df)
-                except Exception as e:
-                    st.error(f"文件 {file.name} 读取失败: {e}")
-                
-                progress_bar.progress((i + 1) / len(uploaded_files))
-            
-            if dfs:
-                try:
-                    status_text.text("正在拼接...")
-                    merged_df = pd.concat(dfs, ignore_index=True)
-                    st.success(f"合并成功！共处理 {len(dfs)} 个文件，结果包含 {merged_df.shape[0]} 行。")
-                    
-                    st.dataframe(merged_df.head(50), use_container_width=True)
-                    
-                    st.download_button(
-                        "📥 下载合并后的 Excel", 
-                        convert_df_to_excel(merged_df), 
-                        "merged_result.xlsx"
-                    )
-                except Exception as e:
-                    st.error(f"合并失败: {e}。通常是因为不同文件的列名不一致。")
-            else:
-                st.warning("没有成功读取任何数据。")
-
-else:
-    st.info("请在左侧侧边栏选择模式。")
+        if dfs:
+            merged = pd.concat(dfs, ignore_index=True)
+            st.success(f"合并完成：共 {len(dfs)} 个文件，总计 {len(merged)} 行。")
+            st.dataframe(merged.head(100), use_container_width=True)
+            st.download_button("下载合并结果 (Excel)", to_excel(merged), "merged_data_ives.xlsx")
